@@ -1,11 +1,38 @@
-import { merge, fromEvent, EMPTY, pipe, combineLatest, of } from "rxjs";
+import {
+  merge,
+  fromEvent,
+  EMPTY,
+  pipe,
+  combineLatest,
+  of,
+  timer,
+  BehaviorSubject,
+  ReplaySubject,
+  Subject,
+  from
+} from "rxjs";
 import {
   mapTo,
   map,
   pairwise,
   throttleTime,
   switchMap,
-  auditTime
+  auditTime,
+  debounce,
+  audit,
+  throttle,
+  concatMap,
+  tap,
+  startWith,
+  mergeMap,
+  distinctUntilChanged,
+  take,
+  takeUntil,
+  multicast,
+  refCount,
+  share,
+  publishReplay,
+  publish
 } from "rxjs/operators";
 import { fromResize } from "./resizeObservable";
 
@@ -19,7 +46,7 @@ document.getElementById("app")!.innerHTML = `
   for more info about Parcel.
 </div>
 
-<div class="alpha" style="width: 50px; height: 50px"></div>
+<div class="alpha" style="width: 50px; height: 50px" tabindex="0"></div>
 <div style="width: 50px; height: 50px;"></div>
 <div class="beta" style="width: 50px; height: 50px"></div>
 `;
@@ -28,36 +55,105 @@ const alpha = document.querySelector(".alpha")!;
 const beta = document.querySelector(".beta")!;
 console.log({ alpha, beta });
 
-const focus$ = merge(
+const testSubject = new ReplaySubject();
+const source = from([1, 2, 3]);
+const multi$ = source.pipe(multicast(testSubject), refCount());
+
+testSubject.next("foo");
+
+multi$.subscribe((x) => console.log(x));
+
+// setTimeout(() => {
+// }, 1000);
+
+enum EventType {
+  KEYBOARD,
+  MOUSE
+}
+
+const mouseFocusFoo$ = new ReplaySubject();
+
+const show$ = new Subject();
+const hide$ = new Subject();
+
+const mouseFocus$ = merge(
   fromEvent(alpha, "mouseenter"),
   fromEvent(beta, "mouseenter")
-);
-const blur$ = merge(
-  fromEvent(alpha, "mouseleave"),
-  fromEvent(beta, "mouseleave")
-);
+).pipe(mapTo(EventType.MOUSE));
+const keyboardFocus$ = merge(
+  fromEvent(alpha, "focus"),
+  fromEvent(beta, "focus")
+).pipe(mapTo(EventType.KEYBOARD));
 
-fromResize(alpha, beta)
-  .pipe(map((resize) => resize.contentRect))
-  .subscribe((size) => console.log(size));
-
-fromEvent<MouseEvent>(document, "mousemove")
+// merge(fromEvent(alpha, "mouseenter"), fromEvent(beta, "mouseenter"))
+merge(mouseFocus$, keyboardFocus$)
   .pipe(
-    throttleTime(100),
-    isTravelingBetween(alpha, beta)
-    // switchMap((is) => (is ? of(is) : of(is).pipe(auditTime(60))))
+    // tap(() => console.log("mouseenter")),
+    switchMap((eventType: EventType) => {
+      const init$ = of(true);
+      const mouse$ = merge(
+        fromEvent(alpha, "mouseleave"),
+        fromEvent(beta, "mouseleave")
+      ).pipe(
+        // tap(() => console.log("mouseleave")),
+        switchMap(() => {
+          return fromEvent<MouseEvent>(document, "mousemove").pipe(
+            throttleTime(50),
+            // tap(() => console.log("mousemove")),
+            isTravelingTowards([beta]),
+            distinctUntilChanged(),
+            debounce((is) => (is ? of(is) : timer(60))),
+            takeUntil(hide$)
+          );
+        })
+      );
+
+      const keyboard$ = merge(
+        fromEvent(alpha, "blur"),
+        fromEvent(beta, "blur")
+      ).pipe(
+        debounce(() => timer(60)),
+        mapTo(false)
+      );
+
+      if (eventType === EventType.MOUSE) {
+        return merge(init$, mouse$);
+      } else {
+        return merge(init$, keyboard$);
+      }
+
+      //return merge(
+      //  of(true),
+      //  merge(
+      //    fromEvent(alpha, "mouseleave"),
+      //    fromEvent(beta, "mouseleave")
+      //  ).pipe(
+      //    // tap(() => console.log("mouseleave")),
+      //    switchMap(() => {
+      //      return fromEvent<MouseEvent>(document, "mousemove").pipe(
+      //        throttleTime(50),
+      //        // tap(() => console.log("mousemove")),
+      //        isTravelingTowards([beta]),
+      //        distinctUntilChanged(),
+      //        debounce((is) => (is ? of(is) : timer(60))),
+      //        takeUntil(hide$)
+      //      );
+      //    })
+      //  )
+      //);
+    })
   )
   .subscribe((is) => {
+    console.log(is);
     if (is) {
       alpha.classList.add("towards");
       beta.classList.add("towards");
     } else {
+      hide$.next();
       alpha.classList.remove("towards");
       beta.classList.remove("towards");
     }
   });
-
-// const travel$ = merge(focus$, blur$.pipe(mapTo(EMPTY))).subscribe();
 
 type Point = [number, number];
 
@@ -84,6 +180,13 @@ function closestPoints(point: Point, rect: DOMRect): [Point, Point] {
     .sort((d1, d2) => d1[1] - d2[1])
     .map((d) => d[0]);
 
+  if (
+    (sortedPoints[0][0] <= point[0] && point[0] <= sortedPoints[1][0]) ||
+    (sortedPoints[0][1] <= point[1] && point[1] <= sortedPoints[1][1])
+  ) {
+    return [sortedPoints[0], sortedPoints[1]]; // two-closest
+  }
+
   return [sortedPoints[1], sortedPoints[2]]; // not two-closest
 }
 
@@ -106,33 +209,26 @@ function isInTriangle(
   return 0 <= a && a <= 1 && 0 <= b && b <= 1 && 0 <= c && c <= 1;
 }
 
-function isTravelingBetween(alpha: Element, beta: Element) {
+type TravelEvent = Pick<MouseEvent, "clientX" | "clientY">;
+
+function isTravelingTowards(elements: Element[]) {
   return pipe(
-    pairwise<MouseEvent>(),
+    startWith<TravelEvent>({
+      clientX: 0,
+      clientY: 0
+    }),
+    pairwise(),
     map(([previousEvent, currentEvent]) => {
-      const closestAlphaPoints = closestPoints(
-        [previousEvent.clientX, previousEvent.clientY],
-        alpha.getBoundingClientRect()
-      );
-
-      const closestBetaPoints = closestPoints(
-        [previousEvent.clientX, previousEvent.clientY],
-        beta.getBoundingClientRect()
-      );
-
-      return (
-        isInTriangle(
+      return elements.some((e) => {
+        const points = closestPoints(
+          [previousEvent.clientX, previousEvent.clientY],
+          e.getBoundingClientRect()
+        );
+        return isInTriangle(
           [currentEvent.clientX, currentEvent.clientY],
-          [
-            ...closestAlphaPoints,
-            [previousEvent.clientX, previousEvent.clientY]
-          ]
-        ) ||
-        isInTriangle(
-          [currentEvent.clientX, currentEvent.clientY],
-          [...closestBetaPoints, [previousEvent.clientX, previousEvent.clientY]]
-        )
-      );
+          [...points, [previousEvent.clientX, previousEvent.clientY]]
+        );
+      });
     })
   );
 }

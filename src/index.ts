@@ -9,7 +9,8 @@ import {
   BehaviorSubject,
   ReplaySubject,
   Subject,
-  from
+  from,
+  iif
 } from "rxjs";
 import {
   mapTo,
@@ -49,10 +50,12 @@ document.getElementById("app")!.innerHTML = `
 <div class="alpha" style="width: 50px; height: 50px" tabindex="0"></div>
 <div style="width: 50px; height: 50px;"></div>
 <div class="beta" style="width: 50px; height: 50px"></div>
+<div class="gamma" style="width: 50px; height: 50px"></div>
 `;
 
 const alpha = document.querySelector(".alpha")!;
 const beta = document.querySelector(".beta")!;
+const gamma = document.querySelector(".gamma")!;
 console.log({ alpha, beta });
 
 const testSubject = new ReplaySubject();
@@ -71,30 +74,59 @@ enum EventType {
   MOUSE
 }
 
-const mouseFocusFoo$ = new ReplaySubject();
-
-const show$ = new Subject();
+const show$ = new BehaviorSubject(false);
 const hide$ = new Subject();
 
+const mouseSource$ = fromEvent(alpha, "mouseenter");
+const mouseSubject = new Subject();
+const allMouseFocus$ = show$
+  .pipe(
+    switchMap((show) =>
+      show
+        ? merge(fromEvent(alpha, "mouseenter"), fromEvent(beta, "mouseenter"))
+        : fromEvent(alpha, "mouseenter")
+    )
+  )
+  .pipe(mapTo(EventType.MOUSE));
+
+const allMouseBlur$ = show$
+  .pipe(
+    switchMap((show) =>
+      show
+        ? merge(fromEvent(alpha, "mouseleave"), fromEvent(beta, "mouseleave"))
+        : fromEvent(alpha, "mouseleave")
+    )
+  )
+  .pipe(mapTo(EventType.MOUSE));
+
+mouseSource$
+  .pipe(multicast(mouseSubject), refCount())
+  .pipe(mapTo(EventType.MOUSE));
+
+const mouseFocusFoo$ = new ReplaySubject();
+
 const mouseFocus$ = merge(
-  fromEvent(alpha, "mouseenter"),
-  fromEvent(beta, "mouseenter")
+  fromEvent(alpha, "mouseenter")
+  // fromEvent(beta, "mouseenter")
 ).pipe(mapTo(EventType.MOUSE));
 const keyboardFocus$ = merge(
-  fromEvent(alpha, "focus"),
-  fromEvent(beta, "focus")
+  fromEvent(alpha, "focus")
+  // fromEvent(beta, "focus")
 ).pipe(mapTo(EventType.KEYBOARD));
 
+// mouseFocus$.next();
+
 // merge(fromEvent(alpha, "mouseenter"), fromEvent(beta, "mouseenter"))
-merge(mouseFocus$, keyboardFocus$)
+merge(allMouseFocus$, keyboardFocus$)
   .pipe(
     // tap(() => console.log("mouseenter")),
     switchMap((eventType: EventType) => {
       const init$ = of(true);
-      const mouse$ = merge(
-        fromEvent(alpha, "mouseleave"),
-        fromEvent(beta, "mouseleave")
-      ).pipe(
+      // const mouse$ = merge(
+      // fromEvent(alpha, "mouseleave")
+      // fromEvent(beta, "mouseleave")
+      // ).pipe(
+      const mouse$ = allMouseBlur$.pipe(
         // tap(() => console.log("mouseleave")),
         switchMap(() => {
           return fromEvent<MouseEvent>(document, "mousemove").pipe(
@@ -109,14 +141,15 @@ merge(mouseFocus$, keyboardFocus$)
       );
 
       const keyboard$ = merge(
-        fromEvent(alpha, "blur"),
-        fromEvent(beta, "blur")
+        fromEvent(alpha, "blur")
+        // fromEvent(beta, "blur")
       ).pipe(
         debounce(() => timer(60)),
         mapTo(false)
       );
 
       if (eventType === EventType.MOUSE) {
+        // fromEvent(beta, "mouseenter").pipe(multicast(mouseSubject));
         return merge(init$, mouse$);
       } else {
         return merge(init$, keyboard$);
@@ -144,16 +177,19 @@ merge(mouseFocus$, keyboardFocus$)
     })
   )
   .subscribe((is) => {
-    console.log(is);
-    if (is) {
-      alpha.classList.add("towards");
-      beta.classList.add("towards");
-    } else {
-      hide$.next();
-      alpha.classList.remove("towards");
-      beta.classList.remove("towards");
-    }
+    show$.next(is);
+    if (!is) hide$.next();
   });
+
+show$.subscribe((show) => {
+  if (show) {
+    alpha.classList.add("towards");
+    beta.classList.add("towards");
+  } else {
+    alpha.classList.remove("towards");
+    beta.classList.remove("towards");
+  }
+});
 
 type Point = [number, number];
 
